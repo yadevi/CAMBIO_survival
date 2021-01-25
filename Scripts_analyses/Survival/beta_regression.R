@@ -3,7 +3,8 @@ library(tidyverse)
 library(brms)
 library(tidybayes)
 
-#read in all data
+
+#Reading in data read in all data
 df_survival_plot<-read.csv("Data/data_products/df_survival_plot.csv", header = TRUE, row.names = 1)%>%
   as_tibble()%>%
   mutate(surv_sc = ifelse(sum_alive == n_initial, 0.99, proportion_alive))%>% #0 and 1 cannot be entered in beta family
@@ -60,4 +61,84 @@ results_sites_5y_noSpcomp<-survival_5y%>%
 saveRDS(results_sites_5y_noSpcomp,"Model_objects/results_sites_5y_noSpcomp.RDS") #be carefull: don't commit this file, it is way too big!
 
 
+
+
+
+###### Checking the model output on all data ####
+
+
+# output from models run in other script
+out_sites <- readRDS("Model_objects/results_sites_5y_noSpcomp.RDS")
+
+# checking traceplots===========================
+pdf("Figures/Diagnostics/traceplots_noSpComp.pdf")
+for(i in 1:21){
+  print(rstan::traceplot(out_sites$model_sites[[i]]$fit, pars = c("b_Intercept", "b_phi_Intercept", "b_SR_sc", "b_phi_SR_sc"))+
+          ggtitle(out_sites$exp[[i]]))
+}
+dev.off()
+
+
+
+# explore patterns per experiment================================
+
+# plot raw data with predictions as lines
+pdf("Figures/Survival/predicted_survival_noSpComp.pdf")
+for(i in 1:21){
+  newdat <- data.frame(SR_sc = seq(0, max(out_sites$data[[i]]$SR_sc), 1) )
+  
+  preds <- predict(out_sites$model_sites[[i]], newdata = newdat, re_formula = NA)
+  
+  plot(surv_sc ~ jitter(SR_sc, factor = 0.05), data = out_sites$data[[i]], 
+       ylim = c(0, 1), main  = out_sites$exp[[i]])
+  lines(newdat$SR_sc, preds[,1])
+  lines(newdat$SR_sc, preds[,3], lty = 2)
+  lines(newdat$SR_sc, preds[,4], lty = 2)  
+}
+dev.off()
+
+
+
+# summary of predictions across experiments#================================
+
+
+# predictions of monocultures versus highest-diversity levels
+predictions <- out_sites %>%
+  mutate(preds = map2(model_sites, data, ~predict(.x, 
+                                                  newdata = data.frame(SR_sc = c(0, max(.y$SR_sc))),
+                                                  re_formula = NA)
+  )) %>%
+  mutate(SR_sc = map(data, function(x) c(0, max(x$SR_sc)))) %>%
+  mutate(out_preds = map2(preds, SR_sc, ~as_tibble(cbind(.x, .y)))) %>%
+  dplyr::select(exp, out_preds) %>%
+  unnest(cols = c(out_preds)) %>%
+  dplyr::rename(SR_sc = .y)%>%
+  mutate(SR_fc = ifelse(SR_sc == 0, "monoculture", "species mixture"))
+
+
+
+# graph of predictions
+p1 <- ggplot(predictions, aes(exp, Estimate, col = SR_fc)) + 
+  geom_point(position = position_dodge(width = .5)) +
+  geom_errorbar(aes(ymin = Q2.5, ymax = Q97.5), width = 0.2, position = position_dodge(width = .5)) +
+  scale_y_continuous("Plot-level survival percentage") +
+  scale_x_discrete("") +
+  scale_color_discrete("Tree richness") +
+  coord_flip() +
+  theme_bw()
+p1
+ggsave("Figures/Survival/survival_mono_mix.png")
+
+# meta regression =============
+# meta regression model
+priors <- c(prior(normal(0,1), class = Intercept),
+            prior(cauchy(0,0.5), class = sd))
+
+meta_reg <- brm(bf(Estimate | se(Est.Error) ~ SR_fc + (1 | exp)),
+                data = predictions,
+                control=list(adapt_delta = 0.99, 
+                             max_treedepth=15),
+                iter = 8000, warmup = 1000, chains = 2, cores = 2)
+
+plot(meta_reg) #problems with mixing chains, needs to be fixed before looking deeper into this model
 
